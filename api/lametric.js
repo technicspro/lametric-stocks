@@ -1,23 +1,24 @@
 export default async function handler(req, res) {
   try {
-    const tickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD"];
-
     const apiKey = process.env.POLYGON_API_KEY;
 
-    // Optional: set these in Vercel Environment Variables after you upload icons to LaMetric
-    // If not set, it will just use fallbackIcon for everything.
-    const iconUp = parseInt(process.env.LAMETRIC_ICON_UP || "", 10);
-    const iconDown = parseInt(process.env.LAMETRIC_ICON_DOWN || "", 10);
-    const iconFlat = parseInt(process.env.LAMETRIC_ICON_FLAT || "", 10);
-
-    // Your current/fallback icon (works even if you don't set arrow icons)
-    const fallbackIcon = 42844;
+    // Optional: set these in Vercel env vars if you upload icons to LaMetric
+    // (green up arrow icon id, red down arrow icon id)
+    const UP_ICON = parseInt(process.env.LAMETRIC_UP_ICON || "", 10);
+    const DOWN_ICON = parseInt(process.env.LAMETRIC_DOWN_ICON || "", 10);
 
     if (!apiKey) {
       return res.status(200).json({
-        frames: [{ text: "Missing POLYGON_API_KEY", icon: fallbackIcon, index: 0 }],
+        frames: [{ text: "Missing POLYGON_API_KEY", icon: 42844, index: 0 }],
       });
     }
+
+    // Default tickers (you can override with ?tickers=AAPL,NVDA,...)
+    const defaultTickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD"];
+    const tickersParam = (req.query.tickers || "").toString().trim();
+    const tickers = tickersParam
+      ? tickersParam.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean)
+      : defaultTickers;
 
     const url =
       "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers" +
@@ -26,95 +27,79 @@ export default async function handler(req, res) {
       "&apiKey=" +
       encodeURIComponent(apiKey);
 
-    const response = await fetch(url, { headers: { "User-Agent": "lametric-stocks" } });
-    const data = await response.json();
+    const r = await fetch(url, { headers: { "Accept": "application/json" } });
+    const data = await r.json();
 
-    // If Polygon errors, show it on the device (helps debugging)
-    if (!response.ok || data.status === "ERROR") {
-      const msg = data.error || data.message || `Polygon error (${response.status})`;
+    // If Polygon errors, show the message on the clock
+    if (!r.ok || data.status === "ERROR") {
+      const msg = (data.error || data.message || `Polygon error ${r.status}`).toString();
       return res.status(200).json({
-        frames: [{ text: msg.slice(0, 25), icon: fallbackIcon, index: 0 }],
+        frames: [{ text: msg.slice(0, 25), icon: 42844, index: 0 }],
       });
     }
 
     const items = Array.isArray(data.tickers) ? data.tickers : [];
 
-    // If nothing came back, show a clear message
-    if (!items.length) {
-      return res.status(200).json({
-        frames: [{ text: "No ticker data", icon: fallbackIcon, index: 0 }],
-      });
-    }
+    // Build frames per ticker
+    const frames = items.map((t, idx) => {
+      const symbol = t.ticker || "???";
 
-    // Build frames
-    const frames = [];
+      // Price fallback chain (prevents constant 0.00)
+      const lastTrade = t.lastTrade?.p;
+      const lastQuote = t.lastQuote?.p;
+      const dayClose = t.day?.c;
+      const prevClose = t.prevDay?.c;
 
-    // Optional “status” frame if lastTrade is missing on many tickers (common right after open / off hours)
-    const missingLast = items.filter((t) => !t.lastTrade || typeof t.lastTrade.p !== "number").length;
-    if (missingLast > 0) {
-      frames.push({
-        text: `Market: NO LAST ${missingLast}`,
-        icon: fallbackIcon,
-        index: 0,
-      });
-    }
+      const price =
+        (Number.isFinite(lastTrade) && lastTrade) ||
+        (Number.isFinite(lastQuote) && lastQuote) ||
+        (Number.isFinite(dayClose) && dayClose) ||
+        (Number.isFinite(prevClose) && prevClose) ||
+        null;
 
-    // Then one frame per ticker
-    items.forEach((t, i) => {
-      const sym = t.ticker || "???";
-
-      const last = t.lastTrade && typeof t.lastTrade.p === "number" ? t.lastTrade.p : null;
-      const dayClose = t.day && typeof t.day.c === "number" ? t.day.c : null;
-      const prevClose = t.prevDay && typeof t.prevDay.c === "number" ? t.prevDay.c : null;
-
-      // Pick best available “current price”
-      const price = last ?? dayClose ?? prevClose;
-
-      // Compute change vs prev close (only if we have prev close + price)
-      let change = null;
-      let pct = null;
-      if (price != null && prevClose != null && prevClose !== 0) {
-        change = price - prevClose;
-        pct = (change / prevClose) * 100;
+      // Change % (use Polygon field if present, otherwise compute from prev close)
+      let chgPct = null;
+      if (Number.isFinite(t.todaysChangePerc)) {
+        chgPct = t.todaysChangePerc;
+      } else if (price != null && Number.isFinite(prevClose) && prevClose) {
+        chgPct = ((price - prevClose) / prevClose) * 100;
       }
 
-      // Decide direction
-      let direction = "FLAT";
-      if (change != null) {
-        if (change > 0) direction = "UP";
-        else if (change < 0) direction = "DOWN";
-      }
+      // Decide arrow/icon
+      const isUp = chgPct != null ? chgPct >= 0 : null;
+      const arrow = isUp == null ? "" : isUp ? "▲" : "▼";
 
-      // Choose icon (prefer your arrow icons if you set them)
-      let icon = fallbackIcon;
-      if (direction === "UP" && Number.isFinite(iconUp)) icon = iconUp;
-      if (direction === "DOWN" && Number.isFinite(iconDown)) icon = iconDown;
-      if (direction === "FLAT" && Number.isFinite(iconFlat)) icon = iconFlat;
+      const icon =
+        isUp == null
+          ? 42844
+          : isUp
+          ? (Number.isFinite(UP_ICON) ? UP_ICON : 42844)
+          : (Number.isFinite(DOWN_ICON) ? DOWN_ICON : 42844);
 
-      // Compose text
-      // Keep it short so it fits nicely on LaMetric
-      let text;
-      if (price == null) {
-        text = `${sym} --`;
-      } else if (pct == null) {
-        text = `${sym} ${price.toFixed(2)}`;
-      } else {
-        const sign = change > 0 ? "+" : "";
-        text = `${sym} ${price.toFixed(2)} ${sign}${pct.toFixed(2)}%`;
-      }
+      // Build text
+      const priceText = price == null ? "NO LAST" : price.toFixed(2);
+      const pctText =
+        chgPct == null ? "" : ` ${arrow}${Math.abs(chgPct).toFixed(2)}%`;
 
-      frames.push({
-        text,
+      return {
+        text: `${symbol} ${priceText}${pctText}`.slice(0, 25), // LaMetric safe length
         icon,
-        index: frames.length, // important: keep index sequential
-      });
+        index: idx + 1,
+      };
     });
 
-    // Return LaMetric format
-    return res.status(200).json({ frames });
+    // Market status frame
+    const anyHasLast = frames.some((f) => !f.text.includes("NO LAST"));
+    const marketFrame = {
+      text: anyHasLast ? `Market: OPEN ${frames.length}` : `Market: NO LAST ${frames.length}`,
+      icon: 42844,
+      index: 0,
+    };
+
+    res.status(200).json({ frames: [marketFrame, ...frames] });
   } catch (err) {
-    return res.status(200).json({
-      frames: [{ text: "Error loading prices", icon: 42844, index: 0 }],
+    res.status(200).json({
+      frames: [{ text: "Server error", icon: 42844, index: 0 }],
     });
   }
 }
