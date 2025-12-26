@@ -1,71 +1,70 @@
 export default async function handler(req, res) {
   try {
+    const tickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD"];
     const apiKey = process.env.POLYGON_API_KEY;
 
     if (!apiKey) {
       return res.status(200).json({
-        frames: [{ text: "Missing POLYGON_API_KEY", icon: 42844, index: 0 }],
+        frames: [{ text: "Missing POLYGON_API_KEY" }]
       });
     }
 
-    // Your tickers (can override by adding ?tickers=AAPL,NVDA,...)
-    const defaultTickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD"];
-    const tickersParam = (req.query.tickers || "").toString().trim();
-    const tickers = tickersParam
-      ? tickersParam.split(",").map(s => s.trim().toUpperCase()).filter(Boolean)
-      : defaultTickers;
-
     const url =
       "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers" +
-      "?tickers=" + encodeURIComponent(tickers.join(",")) +
-      "&apiKey=" + encodeURIComponent(apiKey);
+      "?tickers=" +
+      encodeURIComponent(tickers.join(",")) +
+      "&apiKey=" +
+      encodeURIComponent(apiKey);
 
-    const r = await fetch(url);
-    const data = await r.json();
+    const response = await fetch(url);
+    const data = await response.json();
 
-    // If Polygon returns an error, show it on the clock (shortened)
-    if (!r.ok || data?.status === "ERROR") {
-      const msg = (data?.error || data?.message || `Polygon error ${r.status}`).toString();
+    // Polygon sometimes returns an error JSON with "error" or "message"
+    if (!response.ok || data?.status === "ERROR") {
+      const msg = (data?.error || data?.message || `Polygon error ${response.status}`).toString();
       return res.status(200).json({
-        frames: [{ text: msg.slice(0, 25), icon: 42844, index: 0 }],
+        frames: [{ text: msg.slice(0, 25) }]
       });
     }
 
     const items = Array.isArray(data?.tickers) ? data.tickers : [];
 
-    // Build LaMetric frames: prefer last trade, then day close, then prev day close.
-    const frames = items.slice(0, 20).map((t, i) => {
-      const sym = t?.ticker || "???";
+    // Helper: pick the best available price without defaulting to 0
+    const pickPrice = (t) => {
+      const last = t?.lastTrade?.p;
+      if (Number.isFinite(last) && last > 0) return last;
 
-      const price =
-        (t?.lastTrade?.p ?? null) ??
-        (t?.lastQuote?.p ?? null) ??
-        (t?.day?.c ?? null) ??
-        (t?.prevDay?.c ?? null) ??
-        (t?.min?.c ?? null);
+      const dayClose = t?.day?.c;
+      if (Number.isFinite(dayClose) && dayClose > 0) return dayClose;
 
-      const p = (typeof price === "number" && isFinite(price)) ? price : 0;
+      const prevClose = t?.prevDay?.c;
+      if (Number.isFinite(prevClose) && prevClose > 0) return prevClose;
 
-      return {
-        text: `${sym} ${p.toFixed(2)}`,
-        icon: 42844,
-        index: i,
-      };
-    });
+      return null;
+    };
 
-    // If Polygon returns nothing, show a clear message
-    if (!frames.length) {
-      return res.status(200).json({
-        frames: [{ text: "No data from Polygon", icon: 42844, index: 0 }],
-      });
-    }
+    // OPTIONAL: show a quick market hint frame first
+    // If any ticker has lastTrade price > 0, we call it "LIVE"
+    const live = items.some((t) => Number.isFinite(t?.lastTrade?.p) && t.lastTrade.p > 0);
+    const statusFrame = { text: live ? "Market: LIVE" : "Market: NO LAST" };
 
-    // Helps prevent weird caching issues
-    res.setHeader("Cache-Control", "no-store");
+    const frames = items.length
+      ? [statusFrame].concat(
+          items.map((t, index) => {
+            const symbol = t?.ticker || "???";
+            const price = pickPrice(t);
+            const text = price ? `${symbol} ${price.toFixed(2)}` : `${symbol} n/a`;
+
+            return { text, icon: 42844, index: index + 1 };
+          })
+        )
+      : [{ text: "No tickers returned" }];
+
+    // IMPORTANT: LaMetric expects { frames: [...] }
     return res.status(200).json({ frames });
   } catch (err) {
     return res.status(200).json({
-      frames: [{ text: "Server error", icon: 42844, index: 0 }],
+      frames: [{ text: "Server error" }]
     });
   }
 }
