@@ -2,24 +2,20 @@ export default async function handler(req, res) {
   try {
     const apiKey = process.env.POLYGON_API_KEY;
 
-    // Optional: set these in Vercel env vars if you upload icons to LaMetric
-    // (green up arrow icon id, red down arrow icon id)
-    const UP_ICON = parseInt(process.env.LAMETRIC_UP_ICON || "", 10);
-    const DOWN_ICON = parseInt(process.env.LAMETRIC_DOWN_ICON || "", 10);
+    // PUT YOUR ICON IDS HERE (these are the colored arrows you create in LaMetric)
+    const UP_ICON_ID = 12345;   // <-- green up arrow icon id
+    const DOWN_ICON_ID = 67890; // <-- red down arrow icon id
+    const FLAT_ICON_ID = 42844; // fallback (your existing icon)
+
+    const tickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD"];
 
     if (!apiKey) {
       return res.status(200).json({
-        frames: [{ text: "Missing POLYGON_API_KEY", icon: 42844, index: 0 }],
+        frames: [{ text: "Missing POLYGON_API_KEY", icon: FLAT_ICON_ID, index: 0 }],
       });
     }
 
-    // Default tickers (you can override with ?tickers=AAPL,NVDA,...)
-    const defaultTickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD"];
-    const tickersParam = (req.query.tickers || "").toString().trim();
-    const tickers = tickersParam
-      ? tickersParam.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean)
-      : defaultTickers;
-
+    // Polygon snapshot endpoint for multiple tickers
     const url =
       "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers" +
       "?tickers=" +
@@ -27,79 +23,84 @@ export default async function handler(req, res) {
       "&apiKey=" +
       encodeURIComponent(apiKey);
 
-    const r = await fetch(url, { headers: { "Accept": "application/json" } });
-    const data = await r.json();
+    const response = await fetch(url);
+    const data = await response.json();
 
-    // If Polygon errors, show the message on the clock
-    if (!r.ok || data.status === "ERROR") {
-      const msg = (data.error || data.message || `Polygon error ${r.status}`).toString();
+    // Basic error handling
+    if (!response.ok || data?.status === "ERROR") {
+      const msg = (data?.error || data?.message || "Polygon error").toString();
       return res.status(200).json({
-        frames: [{ text: msg.slice(0, 25), icon: 42844, index: 0 }],
+        frames: [{ text: msg.slice(0, 25), icon: FLAT_ICON_ID, index: 0 }],
       });
     }
 
-    const items = Array.isArray(data.tickers) ? data.tickers : [];
+    const items = Array.isArray(data?.tickers) ? data.tickers : [];
 
-    // Build frames per ticker
-    const frames = items.map((t, idx) => {
-      const symbol = t.ticker || "???";
+    // Market status line (helps you see when Polygon is not giving lastTrade yet)
+    const noLastCount = items.filter((t) => !t?.lastTrade?.p).length;
+    const marketLine =
+      noLastCount > 0 ? `Market: NO LAST ${noLastCount}` : "Market: OK";
 
-      // Price fallback chain (prevents constant 0.00)
-      const lastTrade = t.lastTrade?.p;
-      const lastQuote = t.lastQuote?.p;
-      const dayClose = t.day?.c;
-      const prevClose = t.prevDay?.c;
+    const frames = [];
 
-      const price =
-        (Number.isFinite(lastTrade) && lastTrade) ||
-        (Number.isFinite(lastQuote) && lastQuote) ||
-        (Number.isFinite(dayClose) && dayClose) ||
-        (Number.isFinite(prevClose) && prevClose) ||
-        null;
+    // Frame 0: market status
+    frames.push({ text: marketLine, icon: FLAT_ICON_ID, index: 0 });
 
-      // Change % (use Polygon field if present, otherwise compute from prev close)
-      let chgPct = null;
-      if (Number.isFinite(t.todaysChangePerc)) {
-        chgPct = t.todaysChangePerc;
-      } else if (price != null && Number.isFinite(prevClose) && prevClose) {
-        chgPct = ((price - prevClose) / prevClose) * 100;
+    // Frames 1..n: each ticker
+    items.forEach((t, i) => {
+      const symbol = t?.ticker || "";
+      const last = t?.lastTrade?.p;
+
+      // Prefer Polygon’s computed % if present, otherwise compute from day/prevDay close
+      let pct =
+        typeof t?.todaysChangePerc === "number"
+          ? t.todaysChangePerc
+          : null;
+
+      if (pct === null) {
+        const dayClose = t?.day?.c;
+        const prevClose = t?.prevDay?.c;
+        if (typeof dayClose === "number" && typeof prevClose === "number" && prevClose !== 0) {
+          pct = ((dayClose - prevClose) / prevClose) * 100;
+        }
       }
 
-      // Decide arrow/icon
-      const isUp = chgPct != null ? chgPct >= 0 : null;
-      const arrow = isUp == null ? "" : isUp ? "▲" : "▼";
+      // If no last trade yet (common around open/halts), show a clear message
+      if (typeof last !== "number") {
+        frames.push({
+          text: `${symbol} NO LAST`,
+          icon: FLAT_ICON_ID,
+          index: i + 1,
+        });
+        return;
+      }
 
-      const icon =
-        isUp == null
-          ? 42844
-          : isUp
-          ? (Number.isFinite(UP_ICON) ? UP_ICON : 42844)
-          : (Number.isFinite(DOWN_ICON) ? DOWN_ICON : 42844);
+      // Choose icon based on % direction
+      let icon = FLAT_ICON_ID;
+      if (typeof pct === "number") {
+        if (pct > 0) icon = UP_ICON_ID;
+        else if (pct < 0) icon = DOWN_ICON_ID;
+      }
 
-      // Build text
-      const priceText = price == null ? "NO LAST" : price.toFixed(2);
-      const pctText =
-        chgPct == null ? "" : ` ${arrow}${Math.abs(chgPct).toFixed(2)}%`;
+      // Format
+      const priceStr = last.toFixed(2);
+      const pctStr = typeof pct === "number" ? ` ${pct.toFixed(2)}%` : "";
 
-      return {
-        text: `${symbol} ${priceText}${pctText}`.slice(0, 25), // LaMetric safe length
+      // Keep text short so it fits LaMetric nicely
+      let text = `${symbol} ${priceStr}${pctStr}`;
+      if (text.length > 16) text = text.slice(0, 16);
+
+      frames.push({
+        text,
         icon,
-        index: idx + 1,
-      };
+        index: i + 1,
+      });
     });
 
-    // Market status frame
-    const anyHasLast = frames.some((f) => !f.text.includes("NO LAST"));
-    const marketFrame = {
-      text: anyHasLast ? `Market: OPEN ${frames.length}` : `Market: NO LAST ${frames.length}`,
-      icon: 42844,
-      index: 0,
-    };
-
-    res.status(200).json({ frames: [marketFrame, ...frames] });
+    return res.status(200).json({ frames });
   } catch (err) {
-    res.status(200).json({
-      frames: [{ text: "Server error", icon: 42844, index: 0 }],
+    return res.status(200).json({
+      frames: [{ text: "Error loading prices", icon: 42844, index: 0 }],
     });
   }
 }
