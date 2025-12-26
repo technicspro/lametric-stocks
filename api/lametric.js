@@ -1,14 +1,26 @@
 export default async function handler(req, res) {
   try {
+    // --- Tickers you want ---
     const tickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD"];
+
+    // --- Your Polygon API key (set in Vercel env vars) ---
     const apiKey = process.env.POLYGON_API_KEY;
+
+    // --- LaMetric icon IDs (YOU set these) ---
+    // Upload a GREEN UP arrow icon + RED DOWN arrow icon in LaMetric Icon Gallery
+    // Then paste the icon IDs below.
+    const ICON_UP = Number(process.env.LAMETRIC_ICON_UP || 0);     // green up arrow icon id
+    const ICON_DOWN = Number(process.env.LAMETRIC_ICON_DOWN || 0); // red down arrow icon id
+    const ICON_FLAT = Number(process.env.LAMETRIC_ICON_FLAT || 0); // optional (grey/white dash), can be 0
+    const ICON_DEFAULT = 42844; // fallback icon if you don't set any
 
     if (!apiKey) {
       return res.status(200).json({
-        frames: [{ text: "Missing POLYGON_API_KEY" }]
+        frames: [{ text: "Missing POLYGON_API_KEY", icon: ICON_DEFAULT }],
       });
     }
 
+    // --- Polygon Snapshot endpoint (multiple tickers) ---
     const url =
       "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers" +
       "?tickers=" +
@@ -19,52 +31,98 @@ export default async function handler(req, res) {
     const response = await fetch(url);
     const data = await response.json();
 
-    // Polygon sometimes returns an error JSON with "error" or "message"
+    // Polygon sometimes returns {status:"ERROR", error:"..."}
     if (!response.ok || data?.status === "ERROR") {
-      const msg = (data?.error || data?.message || `Polygon error ${response.status}`).toString();
+      const msg = (data?.error || data?.message || `Polygon error (${response.status})`).toString();
       return res.status(200).json({
-        frames: [{ text: msg.slice(0, 25) }]
+        frames: [{ text: msg.slice(0, 25), icon: ICON_DEFAULT }],
       });
     }
 
     const items = Array.isArray(data?.tickers) ? data.tickers : [];
 
-    // Helper: pick the best available price without defaulting to 0
-    const pickPrice = (t) => {
-      const last = t?.lastTrade?.p;
-      if (Number.isFinite(last) && last > 0) return last;
+    // --- Determine market status message ---
+    // Free Polygon plans can be delayed; you noticed ~15 mins. We'll surface that.
+    // We also detect "no last trade yet" situations.
+    let statusText = "Market: OK";
+    let anyMissingLast = false;
 
-      const dayClose = t?.day?.c;
-      if (Number.isFinite(dayClose) && dayClose > 0) return dayClose;
+    // You can tweak this: premarket/open can still be missing lastTrade early in session.
+    for (const t of items) {
+      if (!t?.lastTrade?.p) {
+        anyMissingLast = true;
+        break;
+      }
+    }
 
-      const prevClose = t?.prevDay?.c;
-      if (Number.isFinite(prevClose) && prevClose > 0) return prevClose;
+    // Try to infer "open vs closed" roughly:
+    // If none have lastTrade but they have day.c/prevDay.c, often market is closed or just not printing yet.
+    if (items.length && anyMissingLast) {
+      statusText = "Market: NO LAST";
+    }
 
-      return null;
-    };
+    // --- Build LaMetric frames ---
+    // First frame = status
+    const frames = [
+      {
+        text: statusText,
+        icon: ICON_DEFAULT,
+        index: 0,
+      },
+    ];
 
-    // OPTIONAL: show a quick market hint frame first
-    // If any ticker has lastTrade price > 0, we call it "LIVE"
-    const live = items.some((t) => Number.isFinite(t?.lastTrade?.p) && t.lastTrade.p > 0);
-    const statusFrame = { text: live ? "Market: LIVE" : "Market: NO LAST" };
+    // Next frames = each ticker
+    items
+      .filter((t) => tickers.includes(t?.ticker))
+      .sort((a, b) => tickers.indexOf(a.ticker) - tickers.indexOf(b.ticker))
+      .forEach((t, i) => {
+        const symbol = t.ticker;
 
-    const frames = items.length
-      ? [statusFrame].concat(
-          items.map((t, index) => {
-            const symbol = t?.ticker || "???";
-            const price = pickPrice(t);
-            const text = price ? `${symbol} ${price.toFixed(2)}` : `${symbol} n/a`;
+        // Best-effort "current" price:
+        // 1) lastTrade.p (most direct)
+        // 2) lastQuote.p (if available)
+        // 3) day.c (close so far / last close when closed)
+        // 4) prevDay.c (previous close)
+        const price =
+          t?.lastTrade?.p ??
+          t?.lastQuote?.p ??
+          t?.day?.c ??
+          t?.prevDay?.c ??
+          null;
 
-            return { text, icon: 42844, index: index + 1 };
-          })
-        )
-      : [{ text: "No tickers returned" }];
+        // Previous close for up/down comparison
+        const prevClose = t?.prevDay?.c ?? null;
 
-    // IMPORTANT: LaMetric expects { frames: [...] }
+        // Decide direction
+        let direction = "flat";
+        if (price != null && prevClose != null) {
+          if (price > prevClose) direction = "up";
+          else if (price < prevClose) direction = "down";
+        }
+
+        // Choose icon based on direction (if you set them)
+        let iconToUse = ICON_DEFAULT;
+        if (direction === "up" && ICON_UP) iconToUse = ICON_UP;
+        else if (direction === "down" && ICON_DOWN) iconToUse = ICON_DOWN;
+        else if (direction === "flat" && ICON_FLAT) iconToUse = ICON_FLAT;
+
+        // If we STILL don't have a price, show N/A
+        const text =
+          price == null
+            ? `${symbol} N/A`
+            : `${symbol} ${Number(price).toFixed(2)}`;
+
+        frames.push({
+          text,
+          icon: iconToUse,
+          index: i + 1,
+        });
+      });
+
     return res.status(200).json({ frames });
   } catch (err) {
     return res.status(200).json({
-      frames: [{ text: "Server error" }]
+      frames: [{ text: "Server error", icon: 42844 }],
     });
   }
 }
