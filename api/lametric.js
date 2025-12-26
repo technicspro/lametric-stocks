@@ -1,6 +1,6 @@
 export default async function handler(req, res) {
   try {
-    const tickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD"];
+    const tickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD", "SPY", "QQQ"];
 
     const apiKey = process.env.POLYGON_API_KEY;
     const ICON_UP = parseInt(process.env.ICON_UP || "", 10);
