@@ -1,13 +1,14 @@
 export default async function handler(req, res) {
   try {
     const apiKey = process.env.POLYGON_API_KEY;
+
     if (!apiKey) {
       return res.status(200).json({
         frames: [{ text: "Missing POLYGON_API_KEY", icon: 42844, index: 0 }],
       });
     }
 
-    // Your tickers (you can edit this list anytime)
+    // Your tickers (edit if you want)
     const tickers = ["AAPL", "NVDA", "MSFT", "NFLX", "GME", "TSLA", "GOOGL", "AMD"];
 
     const url =
@@ -17,10 +18,10 @@ export default async function handler(req, res) {
       "&apiKey=" +
       encodeURIComponent(apiKey);
 
-    const r = await fetch(url, { headers: { "Accept": "application/json" } });
+    const r = await fetch(url);
     const data = await r.json();
 
-    // If Polygon returns an error, show it on the clock (helpful for debugging)
+    // If Polygon returns an error, show it on the clock
     if (!r.ok || data?.status === "ERROR") {
       const msg = data?.error || data?.message || `Polygon error (${r.status})`;
       return res.status(200).json({
@@ -30,29 +31,30 @@ export default async function handler(req, res) {
 
     const items = Array.isArray(data?.tickers) ? data.tickers : [];
 
-    // Build 1 frame per ticker (LaMetric will rotate them)
-    const frames = tickers.map((sym, i) => {
-      const t = items.find((x) => x.ticker === sym);
+    // Build a quick lookup by symbol
+    const bySymbol = {};
+    for (const it of items) {
+      if (it?.ticker) bySymbol[it.ticker.toUpperCase()] = it;
+    }
 
-      // Best-available price order:
-      // 1) lastTrade.p (if market is open / recent trade)
-      // 2) day.c (today close if present)
-      // 3) prevDay.c (yesterday close - works when market is closed)
+    const frames = tickers.map((sym, index) => {
+      const t = bySymbol[sym];
+
+      // Best available price depending on market state
       const price =
         t?.lastTrade?.p ??
         t?.day?.c ??
         t?.prevDay?.c ??
         null;
 
-      const text = price == null
-        ? `${sym} --`
-        : `${sym} ${Number(price).toFixed(2)}`;
+      const text =
+        price == null
+          ? `${sym} --`
+          : `${sym} ${Number(price).toFixed(2)}`;
 
-      return { text, icon: 42844, index: i };
+      return { text, icon: 42844, index };
     });
 
-    // Avoid caching so your LaMetric polling stays fresh
-    res.setHeader("Cache-Control", "no-store, max-age=0");
     return res.status(200).json({ frames });
   } catch (err) {
     return res.status(200).json({
